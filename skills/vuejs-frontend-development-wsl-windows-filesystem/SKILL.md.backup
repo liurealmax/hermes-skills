@@ -1,0 +1,1299 @@
+---
+name: vuejs-frontend-development-wsl-windows-filesystem
+description: Complete workflow for creating Vue.js projects in WSL with Windows filesystem mounted drives, addressing common permission and execution issues
+author: Hermes
+tags: [vuejs, frontend, wsl, windows-filesystem, vite, element-plus, development]
+---
+
+# Vue.js Frontend Development in WSL with Windows Filesystem
+
+Complete workflow for creating Vue.js projects when working in WSL with Windows filesystem mounted drives (e.g., /mnt/c/, /mnt/d/), addressing common permission and execution issues.
+
+## When to Use This Skill
+
+Use this skill when you need to:
+- Create a Vue.js frontend project in WSL
+- Work with Windows filesystem paths (mounted under /mnt/)
+- Avoid npm permission errors on Windows drives
+- Set up Vue.js + Vite + Element Plus projects
+- Configure frontend-backend integration with Flask APIs
+
+## Common Issues and Solutions
+
+### Issue 1: npm install Permission Errors
+**Problem**: `EPERM: operation not permitted, chmod` errors during npm install on Windows drives
+
+**Solution**: Use `--no-bin-links` flag
+```bash
+npm install --no-bin-links
+```
+
+### Issue 2: Vite Command Not Found
+**Problem**: `sh: 1: vite: not found` when running `npm run dev`
+
+**Solution**: Run Vite directly with node
+```bash
+node node_modules/vite/bin/vite.js
+```
+
+### Issue 3: Project Creation Permission Errors
+**Problem**: `EPERM: operation not permitted, copyfile` when using `npm create vite@latest`
+
+**Solution**: Create project in /tmp first, then copy
+```bash
+# Create in tmp
+cd /tmp && npm create vite@latest project-name -- --template vue
+
+# Copy to target location
+cp -r /tmp/project-name/* /mnt/d/target/path/
+cp -r /tmp/project-name/.[!.]* /mnt/d/target/path/ 2>/dev/null || true
+```
+
+## Complete Workflow
+
+### Step 1: Environment Check
+```bash
+# Check Node.js and npm versions
+node --version && npm --version
+```
+
+### Step 2: Create Vue Project
+```bash
+# Navigate to temporary directory
+cd /tmp
+
+# Create Vue project with Vite
+npm create vite@latest project-name -- --template vue
+
+# Copy to target Windows drive location
+cp -r /tmp/project-name/* /mnt/d/target/path/
+cp -r /tmp/project-name/.[!.]* /mnt/d/target/path/ 2>/dev/null || true
+```
+
+### Step 3: Install Dependencies
+```bash
+cd /mnt/d/target/path/project-name
+
+# Install base dependencies with --no-bin-links
+npm install --no-bin-links
+
+# Install additional dependencies
+npm install axios vue-router@4 pinia element-plus --no-bin-links
+npm install @element-plus/icons-vue --no-bin-links
+```
+
+### Step 4: Create Project Structure
+```bash
+cd src
+mkdir -p api components views router stores utils
+```
+
+### Step 5: Configure Vite for Backend Integration
+```javascript
+// vite.config.js
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  server: {
+    port: 8080,
+    host: '0.0.0.0',
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:5000',
+        changeOrigin: true,
+        rewrite: (path) => path
+      }
+    }
+  }
+})
+```
+
+### Step 6: Setup Axios with Interceptors
+```javascript
+// src/utils/request.js
+import axios from 'axios'
+import { ElMessage } from 'element-plus'
+
+const request = axios.create({
+  baseURL: '/api/v1', // Use Vite proxy
+  timeout: 10000,
+  headers: {
+    'Content-Type': 'application/json'
+  }
+})
+
+// Request interceptor - add token
+request.interceptors.request.use(
+  config => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers['Authorization'] = `Bearer ${token}`
+    }
+    return config
+  },
+  error => Promise.reject(error)
+)
+
+// Response interceptor - handle errors
+request.interceptors.response.use(
+  response => {
+    const res = response.data
+    if (res.success === false) {
+      ElMessage.error(res.message || '请求失败')
+      return Promise.reject(new Error(res.message))
+    }
+    return res
+  },
+  error => {
+    // Handle different error status codes
+    if (error.response) {
+      const { status } = error.response
+      switch (status) {
+        case 401:
+          ElMessage.error('未授权，请重新登录')
+          localStorage.removeItem('token')
+          window.location.href = '/login'
+          break
+        case 403:
+          ElMessage.error('拒绝访问')
+          break
+        case 404:
+          ElMessage.error('请求的资源不存在')
+          break
+        case 500:
+          ElMessage.error('服务器错误')
+          break
+        default:
+          ElMessage.error(`请求失败 (${status})`)
+      }
+    }
+    return Promise.reject(error)
+  }
+)
+
+export default request
+```
+
+### Step 7: Setup Pinia Store for User State
+```javascript
+// src/stores/user.js
+import { defineStore } from 'pinia'
+import { login as loginApi, logout as logoutApi } from '@/api/auth'
+
+export const useUserStore = defineStore('user', {
+  state: () => ({
+    token: localStorage.getItem('token') || '',
+    refreshToken: localStorage.getItem('refreshToken') || '',
+    userInfo: null,
+    roles: []
+  }),
+
+  getters: {
+    isLoggedIn: (state) => !!state.token,
+    isAdmin: (state) => state.roles.includes('admin'),
+    username: (state) => state.userInfo?.username || ''
+  },
+
+  actions: {
+    async login(credentials) {
+      const response = await loginApi(credentials)
+      if (response.success) {
+        this.token = response.data.access_token
+        this.refreshToken = response.data.refresh_token
+        this.userInfo = response.data.user
+        this.roles = response.data.user.roles || []
+        
+        localStorage.setItem('token', this.token)
+        localStorage.setItem('refreshToken', this.refreshToken)
+        return { success: true }
+      }
+      return { success: false, message: response.message }
+    },
+
+    async logout() {
+      try {
+        await logoutApi()
+      } catch (error) {
+        console.error('登出API调用失败:', error)
+      } finally {
+        this.token = ''
+        this.refreshToken = ''
+        this.userInfo = null
+        this.roles = []
+        localStorage.removeItem('token')
+        localStorage.removeItem('refreshToken')
+      }
+    }
+  }
+})
+```
+
+### Step 8: Setup Vue Router with Guards
+```javascript
+// src/router/index.js
+import { createRouter, createWebHistory } from 'vue-router'
+import { useUserStore } from '@/stores/user'
+
+const routes = [
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/Login.vue'),
+    meta: { title: '登录', requiresAuth: false }
+  },
+  {
+    path: '/',
+    name: 'Home',
+    component: () => import('@/views/Home.vue'),
+    meta: { title: '首页', requiresAuth: true }
+  },
+  // Add more routes...
+]
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes
+})
+
+// Route guard
+router.beforeEach((to, from, next) => {
+  const userStore = useUserStore()
+  
+  document.title = to.meta.title ? `${to.meta.title} - 应用名称` : '应用名称'
+  
+  if (to.meta.requiresAuth && !userStore.isLoggedIn) {
+    next({
+      path: '/login',
+      query: { redirect: to.fullPath }
+    })
+  } else if (to.meta.requiresAdmin && !userStore.isAdmin) {
+    next({ path: '/' })
+  } else {
+    next()
+  }
+})
+
+export default router
+```
+
+### Step 9: Configure Main Entry Point
+```javascript
+// src/main.js
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
+import * as ElementPlusIconsVue from '@element-plus/icons-vue'
+import App from './App.vue'
+import router from './router'
+
+const app = createApp(App)
+const pinia = createPinia()
+
+app.use(ElementPlus)
+
+// Register all Element Plus icons
+for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
+  app.component(key, component)
+}
+
+app.use(router)
+app.use(pinia)
+app.mount('#app')
+```
+
+### Step 10: Start Development Servers
+```bash
+# Start backend (Flask)
+cd /path/to/backend
+python3 run.py &
+
+# Start frontend (Vue)
+cd /path/to/frontend
+node node_modules/vite/bin/vite.js &
+```
+
+## Testing Checklist
+
+- [ ] Backend API accessible at http://127.0.0.1:5000
+- [ ] Frontend accessible at http://127.0.0.1:8080
+- [ ] Login functionality works
+- [ ] API calls successful (check browser console)
+- [ ] Token stored in localStorage
+- [ ] Route guards working
+- [ ] Proxy configuration correct
+
+## Common Project Structure
+
+```
+frontend/
+├── src/
+│   ├── api/              # API calls
+│   │   ├── auth.js
+│   │   └── threats.js
+│   ├── components/       # Reusable components
+│   ├── views/           # Page components
+│   │   ├── Login.vue
+│   │   ├── Home.vue
+│   │   └── ...
+│   ├── router/          # Vue Router
+│   │   └── index.js
+│   ├── stores/          # Pinia stores
+│   │   └── user.js
+│   ├── utils/           # Utilities
+│   │   └── request.js
+│   ├── App.vue
+│   └── main.js
+├── public/
+├── package.json
+└── vite.config.js
+```
+
+## Pitfalls and Solutions
+
+### Pitfall 1: CORS Errors
+**Problem**: Browser blocks API calls due to CORS policy
+
+**Solution**: Configure Vite proxy in vite.config.js (see Step 5)
+
+### Pitfall 2: Token Not Persisting
+**Problem**: User gets logged out on page refresh
+
+**Solution**: Store token in localStorage and restore on app load
+
+### Pitfall 3: Route Guard Not Working
+**Problem**: Protected routes accessible without login
+
+**Solution**: Ensure router is registered in main.js and guard logic is correct
+
+### Pitfall 4: Element Plus Icons Not Showing
+**Problem**: Icon components not recognized
+
+**Solution**: Register all icons in main.js (see Step 9)
+
+### Pitfall 5: Vue Template String Syntax Errors with Chinese Quotes
+**Problem**: Vite compilation error "Unterminated template" when using Chinese quotes in template literals
+
+**Error Example**:
+```
+[vite] Internal server error: Error parsing JavaScript expression: Unterminated template. (1:2)
+File: /path/to/Search.vue:40:17
+:title="`搜索"${searchForm.q}"，共找到 ${totalResults} 条结果`"
+```
+
+**Root Cause**: Chinese quotes (`"` and `"`) inside template literals break Vue's template parser
+
+**Solution**: Use string concatenation instead of template literals with quotes
+
+**Before (WRONG)**:
+```javascript
+:title="`搜索"${searchForm.q}"，共找到 ${totalResults} 条结果`"
+```
+
+**After (CORRECT)**:
+```javascript
+:title="'搜索 ' + searchForm.q + '，共找到 ' + totalResults + ' 条结果'"
+```
+
+**Common Patterns**:
+```javascript
+// Delete confirmation dialogs
+// WRONG:
+`确定要删除规则"${row.name}"吗？`
+
+// CORRECT:
+'确定要删除规则 "' + row.name + '" 吗？'
+
+// Search result summaries
+// WRONG:
+`搜索"${query}"，共找到 ${count} 条结果`
+
+// CORRECT:
+'搜索 "' + query + '"，共找到 ' + count + ' 条结果'
+```
+
+**Detection**: Search for template literals with Chinese quotes:
+```bash
+grep -rn '`.*".*".*`' /path/to/frontend/src/views/
+```
+
+**Fix Command**: Replace all occurrences in Vue files
+```bash
+# Find all problematic template strings
+grep -n '`.*".*".*`' /path/to/frontend/src/views/*.vue
+
+# Manually replace each occurrence with string concatenation
+```
+
+### Pitfall 6: User Info Not Restored on Page Refresh
+**Problem**: After login, admin-only UI elements (like "User Management" button) show correctly, but disappear after page refresh. User remains logged in (token exists) but loses admin privileges in the UI.
+
+**Symptoms**:
+- User can login successfully
+- Admin-only buttons/links display correctly after login
+- After page refresh (F5), admin-only UI elements disappear
+- User is still logged in (can access protected routes)
+- Re-logging in restores admin UI elements temporarily
+
+**Root Cause**:
+1. Token is persisted in localStorage, so `isLoggedIn` returns true after refresh
+2. `userInfo` and `roles` are NOT persisted, so they initialize as `null` and `[]`
+3. `isAdmin` getter depends on `roles.includes('admin')`, which returns false
+4. UI elements with `v-if="userStore.isAdmin"` are hidden
+
+**Solution 1: Restore User Info in Router Guard**
+Modify router guard to fetch user info if logged in but userInfo is null:
+
+```javascript
+// src/router/index.js
+router.beforeEach(async (to, from, next) => {
+  const userStore = useUserStore()
+  
+  document.title = to.meta.title ? `${to.meta.title} - 应用名称` : '应用名称'
+  
+  // If logged in but user info is empty, restore it
+  if (userStore.isLoggedIn && !userStore.userInfo) {
+    await userStore.fetchUserInfo()
+  }
+  
+  if (to.meta.requiresAuth && !userStore.isLoggedIn) {
+    next({
+      path: '/login',
+      query: { redirect: to.fullPath }
+    })
+  } else if (to.meta.requiresAdmin && !userStore.isAdmin) {
+    next({ path: '/' })
+  } else {
+    next()
+  }
+})
+```
+
+**Solution 2: Fix Data Structure Mismatch**
+Ensure `fetchUserInfo()` correctly handles API response structure:
+
+```javascript
+// src/stores/user.js
+async fetchUserInfo() {
+  try {
+    const response = await getCurrentUser()
+    
+    if (response.success) {
+      // IMPORTANT: Check actual API response structure
+      // Backend may return { data: { user: { role: "admin" } } }
+      // NOT { data: { role: "admin" } }
+      this.userInfo = response.data.user
+      this.roles = [response.data.user.role] || []
+      return { success: true }
+    } else {
+      return { success: false, message: response.message }
+    }
+  } catch (error) {
+    console.error('获取用户信息失败:', error)
+    return { success: false, message: error.message || '获取用户信息失败' }
+  }
+}
+```
+
+**Verification Steps**:
+1. Login as admin user
+2. Verify admin UI elements are visible
+3. Refresh page (F5)
+4. Verify admin UI elements are still visible
+5. Check browser console for errors
+6. Check Network tab for `/api/v1/auth/me` request
+
+**Common API Response Structure Issues**:
+```javascript
+// WRONG - assuming this structure:
+this.userInfo = response.data
+this.roles = [response.data.role]
+
+// CORRECT - actual structure from backend:
+this.userInfo = response.data.user
+this.roles = [response.data.user.role]
+```
+
+**Testing the Fix**:
+```bash
+# Test API directly to verify response structure
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:5000/api/v1/auth/me | python3 -m json.tool
+
+# Expected output:
+# {
+#   "code": 200,
+#   "data": {
+#     "user": {
+#       "id": 1,
+#       "username": "admin",
+#       "role": "admin",
+#       ...
+#     }
+#   }
+# }
+```
+
+**Prevention**:
+- Always verify actual API response structure before coding
+- Add console.log statements to debug response format
+- Test with curl or Postman first
+- Document expected response format in API documentation
+
+### Pitfall 7: Missing API Exports Causing Module Import Errors
+**Problem**: Vue component fails to load with error: `SyntaxError: The requested module '/src/api/xxx.js' does not provide an export named 'yyy'`
+
+**Symptoms**:
+- Clicking navigation buttons (e.g., "发现方法", "安全事件") has no effect
+- Browser console shows module import errors
+- Page doesn't navigate to the target route
+- Error message indicates missing export function
+
+**Root Cause**:
+Vue component imports a function from API file that doesn't exist or isn't exported:
+```javascript
+// In Methods.vue
+import { getMethods, getMethod, createMethod, updateMethod, deleteMethod } from '@/api/methods'
+// But methods.js only exports getMethods, getMethod, createMethod, updateMethod
+// Missing: deleteMethod
+```
+
+**Solution**: Add missing export functions to API files
+
+**Example Fix for methods.js**:
+```javascript
+// src/api/methods.js
+import request from '@/utils/request'
+
+// Existing exports...
+export function getMethods(params) { /* ... */ }
+export function getMethod(id) { /* ... */ }
+export function createMethod(data) { /* ... */ }
+export function updateMethod(id, data) { /* ... */ }
+
+// ADD THIS - was missing:
+export function deleteMethod(id) {
+  return request({
+    url: `/methods/${id}`,
+    method: 'delete'
+  })
+}
+```
+
+**Example Fix for incidents.js**:
+```javascript
+// src/api/incidents.js
+import request from '@/utils/request'
+
+// Existing exports...
+export function getIncidents(params) { /* ... */ }
+export function getIncident(id) { /* ... */ }
+export function createIncident(data) { /* ... */ }
+export function updateIncident(id, data) { /* ... */ }
+
+// ADD THIS - was missing:
+export function deleteIncident(id) {
+  return request({
+    url: `/incidents/${id}`,
+    method: 'delete'
+  })
+}
+```
+
+**Detection**:
+1. Check browser console for import errors
+2. Look for error pattern: `does not provide an export named 'xxx'`
+3. Identify which API file is missing the export
+4. Check the Vue component's import statement
+
+**Verification Steps**:
+1. Add missing export function to API file
+2. **Restart frontend development server** (Vite needs to reload module changes)
+   ```bash
+   pkill -f "vite"
+   cd /path/to/frontend
+   npm run dev
+   ```
+3. Clear browser cache if needed (Ctrl+Shift+R or Cmd+Shift+R)
+4. Test navigation to the affected page
+5. Verify no console errors
+
+**Prevention**:
+- When creating CRUD API files, always include all 5 operations: get, getById, create, update, delete
+- Use a consistent naming pattern across all API files
+- Create a template for new API files with all standard exports
+- Run a linter or check imports before testing
+
+**API File Template**:
+```javascript
+// src/api/resource-name.js
+import request from '@/utils/request'
+
+// Get list
+export function getResourceNameList(params) {
+  return request({
+    url: '/resource-name',
+    method: 'get',
+    params
+  })
+}
+
+// Get by ID
+export function getResourceName(id) {
+  return request({
+    url: `/resource-name/${id}`,
+    method: 'get'
+  })
+}
+
+// Create
+export function createResourceName(data) {
+  return request({
+    url: '/resource-name',
+    method: 'post',
+    data
+  })
+}
+
+// Update
+export function updateResourceName(id, data) {
+  return request({
+    url: `/resource-name/${id}`,
+    method: 'put',
+    data
+  })
+}
+
+// Delete
+export function deleteResourceName(id) {
+  return request({
+    url: `/resource-name/${id}`,
+    method: 'delete'
+  })
+}
+```
+
+**Common Missing Exports Checklist**:
+- [ ] `deleteMethod` / `deleteIncident` / `deleteResourceName`
+- [ ] `getMethod` / `getIncident` / `getResourceName` (single item)
+- [ ] `getMethods` / `getIncidents` / `getResourceNameList` (list)
+- [ ] `createMethod` / `createIncident` / `createResourceName`
+- [ ] `updateMethod` / `updateIncident` / `updateResourceName`
+
+**Debugging Command**:
+```bash
+# Check all API files for missing delete exports
+for file in /path/to/frontend/src/api/*.js; do
+  if ! grep -q "export function delete" "$file"; then
+    echo "Missing delete export in: $file"
+  fi
+done
+```
+
+**Systematic Debugging Workflow**:
+1. **Check Browser Console First** - Look for module import errors
+2. **Identify Missing Export** - Error message shows which function is missing
+3. **Locate API File** - Check the corresponding API file
+4. **Add Missing Export** - Implement the missing function
+5. **Restart Frontend Server** - Vite needs to reload module changes
+6. **Clear Browser Cache** - Force reload with Ctrl+Shift+R
+7. **Test Navigation** - Verify the button/route works correctly
+
+**Common Error Patterns**:
+```
+# Pattern 1: Missing delete function
+SyntaxError: The requested module '/src/api/methods.js' does not provide an export named 'deleteMethod'
+
+# Pattern 2: Missing get by ID function
+SyntaxError: The requested module '/src/api/incidents.js' does not provide an export named 'getIncident'
+
+# Pattern 3: Missing create function
+SyntaxError: The requested module '/src/api/guides.js' does not provide an export named 'createGuide'
+```
+
+## UI Customization Patterns
+
+### Pattern 1: Open Links in New Tabs
+
+**Use Case**: When you want certain navigation buttons to open in new browser tabs instead of navigating in the current page.
+
+**Implementation**:
+```javascript
+// Instead of router.push()
+const goToSearch = () => {
+  router.push('/search')  // Navigates in current page
+}
+
+// Use window.open() for new tab
+const goToSearch = () => {
+  window.open('/search', '_blank')  // Opens in new tab
+}
+```
+
+**Common Use Cases**:
+- Global search pages
+- Statistics/Analytics dashboards
+- Reports that users want to keep open while working
+- Reference documentation
+
+**Example from Home.vue**:
+```javascript
+const goToSearch = () => {
+  window.open('/search', '_blank')
+}
+
+const goToStats = () => {
+  window.open('/stats', '_blank')
+}
+```
+
+**Verification**:
+1. Click the button
+2. Verify new tab opens
+3. Verify original page remains open
+4. Verify new tab loads correctly
+
+### Pattern 2: Enhanced Button Styling with Tooltips
+
+**Use Case**: When you want navigation buttons to be more prominent and provide helpful tooltips on hover.
+
+**Implementation**:
+```vue
+<!-- Basic button -->
+<el-button :icon="HomeFilled" @click="goToHome" circle />
+
+<!-- Enhanced button with tooltip and larger size -->
+<el-tooltip content="首页" placement="bottom">
+  <el-button type="primary" size="large" :icon="HomeFilled" @click="goToHome" circle />
+</el-tooltip>
+```
+
+**Key Attributes**:
+- `size="large"` - Makes button larger and more prominent
+- `type="primary"` - Uses theme color (blue) for better visibility
+- `el-tooltip` - Wraps button to show tooltip on hover
+- `content="首页"` - Tooltip text to display
+- `placement="bottom"` - Tooltip position (bottom, top, left, right)
+
+**Example from Methods.vue**:
+```vue
+<div class="header-left">
+  <el-tooltip content="首页" placement="bottom">
+    <el-button type="primary" size="large" :icon="HomeFilled" @click="goToHome" circle />
+  </el-tooltip>
+  <h1>发现方法管理</h1>
+</div>
+```
+
+**Common Tooltip Placements**:
+- `placement="bottom"` - Tooltip below button (most common)
+- `placement="top"` - Tooltip above button
+- `placement="left"` - Tooltip to the left
+- `placement="right"` - Tooltip to the right
+
+**Button Size Options**:
+- `size="large"` - Large button (more prominent)
+- `size="default"` - Default size
+- `size="small"` - Small button (less prominent)
+
+**Button Type Options**:
+- `type="primary"` - Blue theme color (most prominent)
+- `type="success"` - Green
+- `type="warning"` - Orange
+- `type="danger"` - Red
+- `type="info"` - Gray
+- `type="default"` - No special styling
+
+**Verification**:
+1. Observe button is larger than before
+2. Observe button has theme color (blue)
+3. Hover over button
+4. Verify tooltip appears with correct text
+5. Verify tooltip is in correct position
+6. Click button to verify functionality
+
+### Pattern 3: Batch UI Updates Across Multiple Pages
+
+**Use Case**: When you need to apply the same UI change to multiple pages (e.g., all "Return to Home" buttons).
+
+**Systematic Approach**:
+1. **Identify All Affected Files**:
+   ```bash
+   grep -r "goToHome" /path/to/frontend/src/views/
+   ```
+
+2. **Create a Consistent Pattern**:
+   ```vue
+   <el-tooltip content="首页" placement="bottom">
+     <el-button type="primary" size="large" :icon="HomeFilled" @click="goToHome" circle />
+   </el-tooltip>
+   ```
+
+3. **Apply to All Files**:
+   - Methods.vue
+   - Incidents.vue
+   - Guides.vue
+   - Alerts.vue
+   - Stats.vue
+   - Search.vue
+   - Users.vue
+   - Threats.vue
+   - ThreatDetail.vue
+   - Check.vue
+   - ApiTest.vue
+
+4. **Test Each Page**:
+   - Navigate to each page
+   - Verify button styling is consistent
+   - Verify tooltip works
+   - Verify navigation works
+
+**Verification Checklist**:
+- [ ] All pages have consistent button styling
+- [ ] All tooltips display correctly
+- [ ] All buttons navigate correctly
+- [ ] No console errors
+- [ ] Responsive design works on different screen sizes
+
+### Pattern 4: User Preference Implementation
+
+**Common User Requests**:
+1. "Make this button bigger/more prominent" → Use `size="large"` and `type="primary"`
+2. "Add a tooltip when hovering" → Wrap with `el-tooltip`
+3. "Open in new tab" → Use `window.open('/path', '_blank')`
+4. "Change button color" → Use different `type` value
+5. "Move tooltip position" → Change `placement` value
+
+**Implementation Workflow**:
+1. **Understand the Request** - Clarify what the user wants
+2. **Choose the Right Pattern** - Select from the patterns above
+3. **Implement the Change** - Apply the pattern to the code
+4. **Test the Change** - Verify it works as expected
+5. **Document the Change** - Note the pattern for future reference
+
+**Example: User Request Analysis**:
+```
+User: "I want the return home button to be bigger and show a tooltip when I hover over it"
+
+Analysis:
+- "bigger" → Use size="large"
+- "show a tooltip" → Wrap with el-tooltip
+- "when I hover" → Tooltip appears on hover by default
+
+Implementation:
+<el-tooltip content="首页" placement="bottom">
+  <el-button type="primary" size="large" :icon="HomeFilled" @click="goToHome" circle />
+</el-tooltip>
+```
+
+## API Testing and Debugging
+
+### Systematic Testing Approach
+
+When testing frontend-backend integration, follow this systematic approach:
+
+1. **Test Basic Connection First**
+```python
+# Test if API is accessible
+response = requests.get(f"{BASE_URL}/auth/me", timeout=5)
+# 401 is expected for unauthenticated requests
+assert response.status_code in [200, 401]
+```
+
+2. **Test Authentication Flow**
+```python
+# Login and get token
+login_response = requests.post(
+    f"{BASE_URL}/auth/login",
+    json={"username": "admin", "password": "Admin@123456"}
+)
+token = login_response.json()["data"]["access_token"]
+
+# Use token for authenticated requests
+response = requests.get(
+    f"{BASE_URL}/auth/me",
+    headers={"Authorization": f"Bearer {token}"}
+)
+```
+
+3. **Handle Multiple Success Status Codes**
+```python
+# APIs may return 200, 201, etc. for success
+if response.status_code in [200, 201]:
+    data = response.json()
+    if data.get("code") in [200, 201]:
+        # Success handling
+```
+
+4. **Verify Actual Response Format**
+```python
+# Always check the actual response structure
+response_data = response.json()
+# Different APIs may return different structures:
+# - data.id vs data.threat.id
+# - data.user vs data.account
+# Always verify with actual API response first
+```
+
+### Common API Integration Issues
+
+#### Issue 1: Response Format Mismatch
+**Problem**: Expected `data.id` but API returns `data.threat.id`
+
+**Solution**: Test with curl first to verify actual format
+```bash
+# Test API with curl to see actual response
+curl -s -X POST http://127.0.0.1:5000/api/v1/threats \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"threat_type":"ip","threat_value":"192.168.1.1"}' | python3 -m json.tool
+```
+
+#### Issue 2: Wrong Parameter Type
+**Problem**: Using query parameters when API expects path parameters
+
+**Solution**: Check API documentation or test different approaches
+```python
+# Wrong: query parameter
+requests.get(f"{BASE_URL}/threats/check/ip?ip=192.168.1.1")
+
+# Correct: path parameter  
+requests.get(f"{BASE_URL}/threats/check/ip/192.168.1.1")
+```
+
+#### Issue 3: Incomplete Status Code Handling
+**Problem**: Only handling 200, missing 201 (Created) and other success codes
+
+**Solution**: Handle all success codes appropriately
+```python
+SUCCESS_CODES = [200, 201, 202, 204]
+if response.status_code in SUCCESS_CODES:
+    # Handle success
+```
+
+### Comprehensive Test Script Template
+
+```python
+#!/usr/bin/env python3
+"""
+Comprehensive API Testing Script
+Tests all major functionality in sequence
+"""
+
+import requests
+import json
+
+class APITester:
+    def __init__(self, base_url):
+        self.base_url = base_url
+        self.token = None
+        self.created_ids = {}
+        
+    def print_result(self, test_name, success, message=""):
+        status = "✅ PASS" if success else "❌ FAIL"
+        print(f"{status} - {test_name}")
+        if message:
+            print(f"       {message}")
+    
+    def test_connection(self):
+        """Test basic API connectivity"""
+        try:
+            response = requests.get(f"{self.base_url}/auth/me", timeout=5)
+            return response.status_code in [200, 401]
+        except:
+            return False
+    
+    def test_login(self):
+        """Test authentication"""
+        try:
+            response = requests.post(
+                f"{self.base_url}/auth/login",
+                json={"username": "admin", "password": "Admin@123456"}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("code") == 200:
+                    self.token = data["data"]["access_token"]
+                    return True
+            return False
+        except:
+            return False
+    
+    def test_crud_operations(self):
+        """Test Create, Read, Update, Delete operations"""
+        # Test Create
+        create_response = requests.post(
+            f"{self.base_url}/resource",
+            headers={"Authorization": f"Bearer {self.token}"},
+            json={"field": "value"}
+        )
+        
+        # Verify response structure
+        if create_response.status_code in [200, 201]:
+            data = create_response.json()
+            # Handle different response formats
+            if "data" in data:
+                if "id" in data["data"]:
+                    resource_id = data["data"]["id"]
+                elif "resource" in data["data"] and "id" in data["data"]["resource"]:
+                    resource_id = data["data"]["resource"]["id"]
+                self.created_ids["resource"] = resource_id
+        
+        # Test Read, Update, Delete using the ID
+        # ... similar pattern for other operations
+    
+    def run_all_tests(self):
+        """Execute all tests in sequence"""
+        results = []
+        
+        # 1. Connection tests
+        results.append(("API Connection", self.test_connection()))
+        
+        # 2. Authentication tests
+        results.append(("Login", self.test_login()))
+        
+        # 3. CRUD tests
+        results.append(("Create", self.test_create()))
+        results.append(("Read", self.test_read()))
+        results.append(("Update", self.test_update()))
+        results.append(("Delete", self.test_delete()))
+        
+        # 4. Feature-specific tests
+        results.append(("Feature 1", self.test_feature_1()))
+        results.append(("Feature 2", self.test_feature_2()))
+        
+        # Report results
+        passed = sum(1 for _, result in results if result)
+        total = len(results)
+        print(f"\nResults: {passed}/{total} passed ({passed/total*100:.1f}%)")
+        
+        return passed == total
+
+# Usage
+if __name__ == "__main__":
+    tester = APITester("http://127.0.0.1:5000/api/v1")
+    success = tester.run_all_tests()
+    exit(0 if success else 1)
+```
+
+### Debugging API Issues
+
+#### Step 1: Isolate the Problem
+```bash
+# Test API directly with curl
+curl -v -X POST http://127.0.0.1:5000/api/v1/endpoint \
+  -H "Content-Type: application/json" \
+  -d '{"key":"value"}'
+```
+
+#### Step 2: Check Response Format
+```python
+# Print full response to understand structure
+import json
+response = requests.post(url, json=data)
+print("Status:", response.status_code)
+print("Headers:", dict(response.headers))
+print("Body:", json.dumps(response.json(), indent=2))
+```
+
+#### Step 3: Verify Authentication
+```python
+# Test without token (should fail)
+response = requests.get(url)
+print("Without token:", response.status_code)
+
+# Test with token (should succeed)
+response = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+print("With token:", response.status_code)
+```
+
+#### Step 4: Check Backend Logs
+```bash
+# Check Flask backend logs for errors
+tail -f /path/to/backend/logs/app.log
+```
+
+## Verification Commands
+
+```bash
+# Check if frontend is running
+curl -s http://127.0.0.1:8080 | grep -q "project-name" && echo "✅ Frontend running"
+
+# Check if backend is running
+curl -s http://127.0.0.1:5000/api/v1/health && echo "✅ Backend running"
+
+# Test login API
+curl -s -X POST http://127.0.0.1:5000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"password"}' | grep -q "access_token" && echo "✅ Login API working"
+
+# Run comprehensive test
+python3 comprehensive_test.py
+```
+
+## Complete End-to-End Testing Workflow
+
+### Testing Strategy
+
+When building a Vue.js + Flask application, follow this comprehensive testing workflow:
+
+#### Phase 1: Backend API Testing
+1. Test each API endpoint individually with curl
+2. Verify authentication and authorization
+3. Test CRUD operations
+4. Validate response formats
+5. Check error handling
+
+#### Phase 2: Frontend Component Testing
+1. Test each page renders correctly
+2. Verify form validation
+3. Check routing and navigation
+4. Test state management
+5. Verify UI components
+
+#### Phase 3: Integration Testing
+1. Test frontend-backend communication
+2. Verify authentication flow
+3. Test complete user workflows
+4. Check error handling and user feedback
+5. Verify data persistence
+
+#### Phase 4: End-to-End Testing
+1. Test complete user journeys
+2. Verify all features work together
+3. Test edge cases and error scenarios
+4. Performance testing
+5. Cross-browser testing
+
+### Test Coverage Checklist
+
+#### Authentication & Authorization
+- [ ] User registration
+- [ ] User login
+- [ ] User logout
+- [ ] Token refresh
+- [ ] Protected route access
+- [ ] Role-based access control
+
+#### CRUD Operations
+- [ ] Create records
+- [ ] Read records (list and detail)
+- [ ] Update records
+- [ ] Delete records
+- [ ] Search and filter
+- [ ] Pagination
+- [ ] Sorting
+
+#### API Integration
+- [ ] Request interceptors working
+- [ ] Response interceptors working
+- [ ] Error handling
+- [ ] Loading states
+- [ ] Token management
+- [ ] CORS configuration
+
+#### User Interface
+- [ ] All pages render correctly
+- [ ] Forms validate properly
+- [ ] Navigation works
+- [ ] Responsive design
+- [ ] Error messages display
+- [ ] Loading indicators show
+
+### Common Testing Patterns
+
+#### Pattern 1: Test Data Cleanup
+```python
+def cleanup_test_data(self):
+    """Clean up data created during testing"""
+    for resource_type, resource_id in self.created_ids.items():
+        try:
+            requests.delete(
+                f"{self.base_url}/{resource_type}/{resource_id}",
+                headers={"Authorization": f"Bearer {self.token}"}
+            )
+        except:
+            pass  # Best effort cleanup
+```
+
+#### Pattern 2: Retry Failed Tests
+```python
+def retry_test(self, test_func, max_retries=3, delay=1):
+    """Retry a test function if it fails"""
+    for attempt in range(max_retries):
+        try:
+            result = test_func()
+            if result:
+                return True
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(delay)
+    return False
+```
+
+#### Pattern 3: Test Data Isolation
+```python
+def setup_test_data(self):
+    """Create isolated test data"""
+    timestamp = int(time.time())
+    test_user = {
+        "username": f"testuser_{timestamp}",
+        "email": f"test_{timestamp}@example.com",
+        "password": "Test@123456"
+    }
+    # Create test user and return ID
+    return test_user
+```
+
+### Performance Testing
+
+#### API Response Time
+```python
+def measure_api_performance(self, endpoint, method="GET", **kwargs):
+    """Measure API response time"""
+    import time
+    
+    start_time = time.time()
+    response = requests.request(method, endpoint, **kwargs)
+    end_time = time.time()
+    
+    response_time = end_time - start_time
+    print(f"{endpoint}: {response_time:.3f}s")
+    
+    return response_time < 1.0  # Consider 1s as threshold
+```
+
+#### Frontend Load Time
+```javascript
+// Measure page load time in browser
+window.addEventListener('load', () => {
+  const loadTime = performance.timing.loadEventEnd - performance.timing.navigationStart;
+  console.log(`Page load time: ${loadTime}ms`);
+});
+```
+
+## When This Approach Won't Work
+
+- If you need to use npm scripts that rely on binary links (workaround: use direct node execution)
+- If you need to run tests that require binary executables (consider using Linux filesystem)
+- If you encounter persistent permission issues (consider moving project to Linux filesystem: ~/projects/)
+- If API responses are inconsistent (add more robust error handling and retry logic)
+- If testing requires complex state management (consider using dedicated testing frameworks)
+
+## Alternative Approach
+
+If permission issues persist, consider creating the project in Linux filesystem:
+```bash
+cd ~/projects
+npm create vite@latest project-name -- --template vue
+# Then work from ~/projects instead of /mnt/d/
+```
+
+## Related Skills
+
+- `flask-test-debugging` - For backend Flask development
+- `api-testing-with-curl` - For testing backend APIs
+- `system-modification-best-practices` - For understanding filesystem considerations
